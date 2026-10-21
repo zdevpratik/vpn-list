@@ -1,0 +1,51 @@
+# Copies the VPN Gate server list into this repo every hour, so the app can
+# fetch it over HTTPS from raw.githubusercontent.com even where vpngate.net is blocked.
+# VPN Gate only lists ~100 servers at once and the countries rotate, so servers.csv
+# keeps every server seen in the last 48 hours (newest first).
+name: Mirror VPN Gate list
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and merge
+        run: |
+          curl -fsSL --max-time 60 -o fresh.csv "http://www.vpngate.net/api/iphone/"
+          python3 - <<'PY'
+          import json, os, time
+          now = int(time.time())
+          fresh = open("fresh.csv", encoding="utf-8", errors="replace").read()
+          if not fresh.lstrip().startswith("*vpn_servers"):
+              raise SystemExit("Not a server list; keeping the previous one")
+          seen = json.load(open("seen.json")) if os.path.exists("seen.json") else {}
+          for row in fresh.splitlines():
+              row = row.strip()
+              if not row or row[0] in "*#" or row.count(",") < 14:
+                  continue
+              key = ",".join(row.split(",", 2)[:2])
+              seen[key] = [now, row]
+          seen = {k: v for k, v in seen.items() if now - v[0] < 48 * 3600}
+          rows = sorted(seen.values(), key=lambda v: -v[0])[:2000]
+          header = fresh.splitlines()[1]
+          with open("servers.csv", "w", encoding="utf-8") as f:
+              f.write("*vpn_servers\n" + header + "\n" + "\n".join(r for _, r in rows) + "\n*\n")
+          json.dump(dict(seen), open("seen.json", "w"))
+          print(f"{len(rows)} servers, {len({r.split(',')[6] for _, r in rows})} countries")
+          PY
+          rm -f fresh.csv
+      - name: Commit
+        run: |
+          git config user.name "mirror-bot"
+          git config user.email "mirror-bot@users.noreply.github.com"
+          git add servers.csv seen.json
+          git diff --cached --quiet || git commit -m "Update server list"
+          git push
